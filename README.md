@@ -7,24 +7,24 @@ The meter has three operational ampifiers (OA) to extend current measurement ran
 - Amplifier 1 gain (OA1, microchip DA2): 40
 - Amplifier 2 gain (OA2, microchip DA1): 391
 
-### Modes
+### Settings
 The meter transfers current data via USB (virtual COM-port).
 
 Data format:
-    - Units: uA
-    - Message example: `19037\r\n`
+- Units: uA
+- Message example: `19037\r\n`
 
-Transmission period can be changed by using push button.
+Transmission period can be changed by using push button  
 Short press changes data transmission period (indicator: **LED2**):
 - **1 ms** period
     - Number of LED blinks: :bulb:
-    - Instant value in any mode
+    - Instant value
 - **10 ms** period
     - Number of LED blinks: :bulb::bulb:
-    - Average value out of 10 in *TEXT* mode, instant value in other modes
+    - Average value out of 10
 - **100 ms** period
     - Number of LED blinks: :bulb::bulb::bulb:
-    - Average value out of 100 in *TEXT* mode, instant value in other modes
+    - Average value out of 100
 
 Meter mode settings are stored in EEPROM and saved after disconnection from USB
 
