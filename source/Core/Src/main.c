@@ -26,7 +26,7 @@
 #include "usbd_cdc_if.h"
 
 #include "eeprom.h"
-#include "status_led.h" // TODO
+#include "led.h"
 
 #define K_ADC_TO_UA 805.860806 // k = 1000000000 / 4095 * 3.3
 #define OA_MAX_ADC_VALUE 2000
@@ -34,11 +34,7 @@
 #define OA1_GAIN 40
 #define OA2_GAIN 391
 
-#define DATA_BUFFER_SIZE 256
-#define DATA_STRING_SIZE 1024
-
-#define DATA_TX_MAX_RECORDS 50
-#define DATA_TX_MAX_RETRIES 10
+#define BUFFER_SIZE 16
 
 #define BUTTON_DELAY     200 // ms
 #define BUTTON_DELAY_LP 1000 // ms
@@ -69,20 +65,21 @@ TIM_HandleTypeDef htim4;
 
 /* USER CODE BEGIN PV */
 
+struct led ledp;
+struct led ledm;
 struct eeprom eeprom;
 settings_t settings;
 
-uint8_t save_settings_flag = 0;
+volatile uint8_t save_settings = 0;
 
 // ADC
 uint16_t adc_data[3];
 
 // Data buffer
-uint16_t data_buffer_raw[DATA_BUFFER_SIZE][3];
-uint32_t data_buffer[DATA_BUFFER_SIZE];
-uint16_t data_buffer_set = 0;
-uint16_t data_buffer_get = 0;
-char data_string[DATA_STRING_SIZE];
+uint32_t buf[BUFFER_SIZE];
+uint32_t measurement = 0;
+size_t bufset = 0;
+size_t bufget = 0;
 
 /* USER CODE END PV */
 
@@ -100,128 +97,143 @@ static void MX_TIM4_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-//
-//
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+/*
+ * @param value:
+ *     = 0 - not pressed
+ *     > 0 - pressed
+ * @retval:
+ *     = 0 - idle
+ *     = 1 - short press
+ *     = 2 - long press
+ */
+static int button(int value)
 {
-	// Button
-	static uint16_t btn_counter = 0;
-	static uint16_t btn_counter_press = 0;
-	static uint8_t btn_state = 1;
+	static int counter_press = 0;
+	static int counter = 0;
+	static int prev = 0;
 
-	// General counter
-	static uint16_t counter = 0;
-	counter = (counter + 1) % 1000;
+	if (counter_press)
+		counter_press--;
 
-	// Period: 1ms
-	// ADC
-	//
-	HAL_ADC_Start_DMA(&hadc1, (uint32_t *) adc_data, 3);
-
-	// Period: 1ms
-	// Button
-	//
-	if(btn_counter_press)
-		btn_counter_press--;
-	//
-	if(btn_counter)
+	if (counter)
 	{
-		btn_counter--;
-	}
-	else
-	{
-		if((btn_state == 1) && (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_12) == GPIO_PIN_RESET))
-		{
-			btn_state = 0;
-			btn_counter = BUTTON_DELAY;
-			btn_counter_press = BUTTON_DELAY_LP;
-		}
-		else if((btn_state == 0) && (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_12) == GPIO_PIN_SET))
-		{
-			btn_state = 1;
-			btn_counter = BUTTON_DELAY;
-
-			// Short press
-			if(btn_counter_press)
-			{
-
-				settings.period *= 10;
-				if (settings.period > 100)
-					settings.period = 1;
-				status_led(0, settings.period == 1 ? 1 :
-						(settings.period == 10 ? 2 : 3));
-				save_settings_flag = 1;
-			}
-			// Long press
-			else
-			{
-				;
-			}
-		}
+		counter--;
+		return 0;
 	}
 
-	// Period: 125ms
-	// LEDs
-	//
-	if((counter % 125) == 0)
-		status_led_callback();
+	// low -> high
+	if (!prev && value)
+	{
+		prev = 1;
+		counter = BUTTON_DELAY;
+		counter_press = BUTTON_DELAY_LP;
+	}
+	// high -> low
+	else if (prev && !value)
+	{
+		prev = 0;
+		counter = BUTTON_DELAY;
+
+		// Short press
+		if (counter_press)
+			return 1;
+		// Long press
+		else
+			return 2;
+	}
+
+	return 0;
 }
 
-//
-//
+inline static int period_to_num(int period)
+{
+	if (period == 1)
+		return 1;
+	else if (period == 10)
+		return 2;
+	else if (period == 100)
+		return 3;
+	return 0;
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+	static int counter = 0;
+	int ret;
+
+	// LEDs
+	counter++;
+	if (counter == 125)
+	{
+		counter = 0;
+		led_irq(&ledp);
+		led_irq(&ledm);
+	}
+
+	// Button
+	ret = button(~HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_12) & 0x01);
+	if (ret == 1)
+	{
+		settings.period *= 10;
+		if (settings.period > 100)
+			settings.period = 1;
+
+		save_settings = 1;
+
+		led(&ledp, period_to_num(settings.period));
+	}
+
+	// ADC
+	HAL_ADC_Start_DMA(&hadc1, (uint32_t *) adc_data, 3);
+}
+
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
 	static uint16_t counter = 0;
-	uint32_t value = 0;
-
-	// Raw data
-	data_buffer_raw[data_buffer_set][0] = adc_data[1];
-	data_buffer_raw[data_buffer_set][1] = adc_data[2];
-	data_buffer_raw[data_buffer_set][2] = adc_data[0];
+	uint32_t value;
 
 	// OA2
-	if(adc_data[0] < OA_MAX_ADC_VALUE)
-		value = adc_data[0] * K_ADC_TO_UA / OA2_GAIN * settings.oa2 / 1000;
+	if (adc_data[0] < OA_MAX_ADC_VALUE)
+	{
+		value = (uint32_t) adc_data[0] * K_ADC_TO_UA / OA2_GAIN;
+		value = value * settings.oa2 / 1000;
+	}
 	// OA1
-	else if(adc_data[2] < OA_MAX_ADC_VALUE)
-		value = adc_data[2] * K_ADC_TO_UA / OA1_GAIN * settings.oa1 / 1000;
+	else if (adc_data[2] < OA_MAX_ADC_VALUE)
+	{
+		value = (uint32_t) adc_data[2] * K_ADC_TO_UA / OA1_GAIN;
+		value = value * settings.oa1 / 1000;
+	}
 	// OA0
 	else
-		value = adc_data[1] * K_ADC_TO_UA / OA0_GAIN * settings.oa0 / 1000;
+	{
+		value = (uint32_t) adc_data[1] * K_ADC_TO_UA / OA0_GAIN;
+		value = value * settings.oa0 / 1000;
+	}
 
-	// Clear buffer
-	if(counter == 0)
-		data_buffer[data_buffer_set] = 0;
+	measurement += value;
+	counter++;
+	if (counter >= settings.period)
+	{
+		// TODO: Buffer can be overwritten
+		buf[bufset] = measurement / counter;
+		bufset = (bufset + 1) % BUFFER_SIZE;
 
-	// Period: 1ms
-	if(settings.period == 1)
-	{
-		data_buffer[data_buffer_set] = value;
-		counter = 0; // ?
-		data_buffer_set = (data_buffer_set + 1) % DATA_BUFFER_SIZE;
+		measurement = 0;
+		counter = 0;
 	}
-	// Period: 10ms
-	else if(settings.period == 10)
-	{
-		data_buffer[data_buffer_set] += value;
-		counter = (counter + 1) % 10;
-		if(counter == 0)
-		{
-			data_buffer[data_buffer_set] /= 10;
-			data_buffer_set = (data_buffer_set + 1) % DATA_BUFFER_SIZE;
-		}
-	}
-	// Period: 100ms
-	else if(settings.period == 100)
-	{
-		data_buffer[data_buffer_set] += value;
-		counter = (counter + 1) % 100;
-		if(counter == 0)
-		{
-			data_buffer[data_buffer_set] /= 100;
-			data_buffer_set = (data_buffer_set + 1) % DATA_BUFFER_SIZE;
-		}
-	}
+}
+
+extern USBD_HandleTypeDef hUsbDeviceFS;
+static int is_usb_ready(void)
+{
+	USBD_CDC_HandleTypeDef *hcdc =
+			(USBD_CDC_HandleTypeDef *) hUsbDeviceFS.pClassData;
+
+	if (hcdc->TxState != 0)
+		return 0;
+
+	return 1;
 }
 
 /* USER CODE END 0 */
@@ -235,6 +247,9 @@ int main(void)
 
   /* USER CODE BEGIN 1 */
 
+  char strbuf[BUFFER_SIZE * 8];
+  size_t maxvals;
+  size_t strlen;
   int ret;
 
   /* USER CODE END 1 */
@@ -277,15 +292,19 @@ int main(void)
   if (ret)
 	  for (;;); // TODO: Notify user
 
-  // LEDs
-  // 1ms, 10ms, 100ms
-  status_led(0, settings.period == 1 ? 1 : (settings.period == 10 ? 2 : 3));
-  status_led(1, 0);
+  ret = led_init(&ledp, GPIOB, GPIO_PIN_13);
+  if (ret)
+	  for (;;); // TODO: Notify user
 
-  // ADC
+  ret = led_init(&ledm, GPIOB, GPIO_PIN_14);
+  if (ret)
+	  for (;;); // TODO: Notify user
+
+  led(&ledp, period_to_num(settings.period));
+  led(&ledm, 0);
+
+  //
   HAL_ADCEx_Calibration_Start(&hadc1);
-
-  // TIM4
   HAL_TIM_Base_Start_IT(&htim4);
 
   while (1)
@@ -295,37 +314,30 @@ int main(void)
     /* USER CODE BEGIN 3 */
 
 	    // Saving settings to storage
-	    if(save_settings_flag)
+	    if (save_settings)
 	    {
-	    	save_settings_flag = 0;
+	    	save_settings = 0;
+
+	    	// Ignore errors
 	    	ret = eeprom_set(&eeprom, &settings);
-	    	if (ret)
-	    	{
-	    		; // TODO
-	    	}
 	    }
 
 		// Data transfer
-	    if(data_buffer_get != data_buffer_set)
+	    if (is_usb_ready() && bufget != bufset)
 	    {
-	    	// Create message
-			uint16_t string_cnt = 0;
-			uint16_t records = DATA_TX_MAX_RECORDS;
+	    	maxvals = BUFFER_SIZE;
+	    	strlen = 0;
 
-			while((data_buffer_get != data_buffer_set) && (records))
+			while (bufget != bufset && maxvals)
 			{
-				string_cnt += sprintf(&data_string[string_cnt], "%lu\r\n", data_buffer[data_buffer_get]);
-				data_buffer_get = (data_buffer_get + 1) % DATA_BUFFER_SIZE;
-				records--;
+				strlen += snprintf(&strbuf[strlen], sizeof(strbuf) - strlen,
+						"%lu\r\n", buf[bufget]);
+				bufget = (bufget + 1) % BUFFER_SIZE;
+				maxvals--;
 			}
 
-			// Transfer message
-			uint16_t retries = DATA_TX_MAX_RETRIES;
-			while((CDC_Transmit_FS((uint8_t*) data_string, string_cnt) == USBD_BUSY) && (retries))
-			{
-				HAL_Delay(1);
-				retries--;
-			}
+			// Ignore errors
+			ret = CDC_Transmit_FS((uint8_t *) strbuf, strlen);
 		}
   }
   /* USER CODE END 3 */
