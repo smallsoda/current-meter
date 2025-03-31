@@ -588,6 +588,44 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+void usb_callback(uint8_t *buf, uint32_t len)
+{
+	static size_t loclen = 0;
+	static char locbuf[128];
+	unsigned int coeff;
+	unsigned int num;
+	int ret;
+
+	if ((loclen + len) > (sizeof(locbuf) - 1))
+	{
+		loclen = 0;
+		return;
+	}
+
+	memcpy(&locbuf[loclen], buf, len);
+	loclen += len;
+
+	if (len && buf[len - 1] == '\r')
+	{
+		locbuf[loclen] = '\0';
+		ret = sscanf(locbuf, "oa%u:%u", &num, &coeff);
+		loclen = 0;
+
+		if (ret != 2)
+			return;
+
+		// TODO: Unsafe. Edit settings copy or use mutex
+		if (num == 0)
+			settings.oa0 = coeff;
+		else if (num == 1)
+			settings.oa1 = coeff;
+		else if (num == 2)
+			settings.oa2 = coeff;
+
+		save_settings = 1;
+	}
+}
+
 /* USER CODE END 4 */
 
 /**

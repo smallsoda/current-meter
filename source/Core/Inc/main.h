@@ -47,6 +47,8 @@ extern "C" {
 /* Exported macro ------------------------------------------------------------*/
 /* USER CODE BEGIN EM */
 
+void usb_callback(uint8_t *buf, uint32_t len);
+
 /* USER CODE END EM */
 
 /* Exported functions prototypes ---------------------------------------------*/
