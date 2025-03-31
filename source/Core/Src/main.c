@@ -25,9 +25,8 @@
 
 #include "usbd_cdc_if.h"
 
-#include "slip.h"
-#include "storage.h"
-#include "status_led.h"
+#include "eeprom.h"
+#include "status_led.h" // TODO
 
 #define K_ADC_TO_UA 805.860806 // k = 1000000000 / 4095 * 3.3
 #define OA_MAX_ADC_VALUE 2000
@@ -61,7 +60,7 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
- ADC_HandleTypeDef hadc1;
+ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
 I2C_HandleTypeDef hi2c1;
@@ -70,8 +69,9 @@ TIM_HandleTypeDef htim4;
 
 /* USER CODE BEGIN PV */
 
-// Storage
-storage_t storage = {0};
+struct eeprom eeprom;
+settings_t settings;
+
 uint8_t save_settings_flag = 0;
 
 // ADC
@@ -89,8 +89,8 @@ char data_string[DATA_STRING_SIZE];
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_I2C1_Init(void);
 static void MX_DMA_Init(void);
+static void MX_I2C1_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
@@ -144,16 +144,18 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 			// Short press
 			if(btn_counter_press)
 			{
-				storage.settings.period = (storage.settings.period + 1) % 3; // 0 - 1ms, 1 - 10ms, 2 - 100ms
-				status_led(0, storage.settings.period + 1); // 1, 2 or 3 blinks
+
+				settings.period *= 10;
+				if (settings.period > 100)
+					settings.period = 1;
+				status_led(0, settings.period == 1 ? 1 :
+						(settings.period == 10 ? 2 : 3));
 				save_settings_flag = 1;
 			}
 			// Long press
 			else
 			{
-				storage.settings.mode = (storage.settings.mode + 1) % 3; // 0 - TEXT, 1 - RAW JSON, 2 - RAW SLIP
-				status_led(1, storage.settings.mode + 1); // 1, 2 or 3 blinks
-				save_settings_flag = 1;
+				;
 			}
 		}
 	}
@@ -179,27 +181,27 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 
 	// OA2
 	if(adc_data[0] < OA_MAX_ADC_VALUE)
-		value = adc_data[0] * K_ADC_TO_UA / OA2_GAIN * storage.calib.oa2 / 1000;
+		value = adc_data[0] * K_ADC_TO_UA / OA2_GAIN * settings.oa2 / 1000;
 	// OA1
 	else if(adc_data[2] < OA_MAX_ADC_VALUE)
-		value = adc_data[2] * K_ADC_TO_UA / OA1_GAIN * storage.calib.oa1 / 1000;
+		value = adc_data[2] * K_ADC_TO_UA / OA1_GAIN * settings.oa1 / 1000;
 	// OA0
 	else
-		value = adc_data[1] * K_ADC_TO_UA / OA0_GAIN * storage.calib.oa0 / 1000;
+		value = adc_data[1] * K_ADC_TO_UA / OA0_GAIN * settings.oa0 / 1000;
 
 	// Clear buffer
 	if(counter == 0)
 		data_buffer[data_buffer_set] = 0;
 
 	// Period: 1ms
-	if(storage.settings.period == 0)
+	if(settings.period == 1)
 	{
 		data_buffer[data_buffer_set] = value;
 		counter = 0; // ?
 		data_buffer_set = (data_buffer_set + 1) % DATA_BUFFER_SIZE;
 	}
 	// Period: 10ms
-	else if(storage.settings.period == 1)
+	else if(settings.period == 10)
 	{
 		data_buffer[data_buffer_set] += value;
 		counter = (counter + 1) % 10;
@@ -210,7 +212,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 		}
 	}
 	// Period: 100ms
-	else if(storage.settings.period == 2)
+	else if(settings.period == 100)
 	{
 		data_buffer[data_buffer_set] += value;
 		counter = (counter + 1) % 100;
@@ -230,7 +232,10 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
   */
 int main(void)
 {
+
   /* USER CODE BEGIN 1 */
+
+  int ret;
 
   /* USER CODE END 1 */
 
@@ -252,8 +257,8 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_I2C1_Init();
   MX_DMA_Init();
+  MX_I2C1_Init();
   MX_USB_DEVICE_Init();
   MX_ADC1_Init();
   MX_TIM4_Init();
@@ -264,17 +269,18 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  // EEPROM storage
-  storage_get_params(&storage);
-  if(storage.settings.empty_status != 0x5A)
-  {
-	  storage_set_default();
-	  storage_get_params(&storage);
-  }
+  ret = eeprom_init(&eeprom, &hi2c1, 0xA0, 0x00);
+  if (ret)
+	  for (;;); // TODO: Notify user
+
+  ret = eeprom_get(&eeprom, &settings);
+  if (ret)
+	  for (;;); // TODO: Notify user
 
   // LEDs
-  status_led(0, storage.settings.period + 1);
-  status_led(1, storage.settings.mode + 1);
+  // 1ms, 10ms, 100ms
+  status_led(0, settings.period == 1 ? 1 : (settings.period == 10 ? 2 : 3));
+  status_led(1, 0);
 
   // ADC
   HAL_ADCEx_Calibration_Start(&hadc1);
@@ -292,7 +298,11 @@ int main(void)
 	    if(save_settings_flag)
 	    {
 	    	save_settings_flag = 0;
-	    	storage_set_params_settings(&storage.settings);
+	    	ret = eeprom_set(&eeprom, &settings);
+	    	if (ret)
+	    	{
+	    		; // TODO
+	    	}
 	    }
 
 		// Data transfer
@@ -302,53 +312,11 @@ int main(void)
 			uint16_t string_cnt = 0;
 			uint16_t records = DATA_TX_MAX_RECORDS;
 
-			// Mode: TEXT
-			if(storage.settings.mode == 0)
+			while((data_buffer_get != data_buffer_set) && (records))
 			{
-				while((data_buffer_get != data_buffer_set) && (records))
-				{
-					string_cnt += sprintf(&data_string[string_cnt], "%lu\r\n", data_buffer[data_buffer_get]);
-					data_buffer_get = (data_buffer_get + 1) % DATA_BUFFER_SIZE;
-					records--;
-				}
-			}
-
-			// Mode: RAW JSON
-			else if(storage.settings.mode == 1)
-			{
-				while((data_buffer_get != data_buffer_set) && (records))
-				{
-					string_cnt += sprintf(
-							&data_string[string_cnt],
-							"{\"OA0\": %d, \"OA1\": %d, \"OA2\": %d}\r\n",
-							data_buffer_raw[data_buffer_get][0],
-							data_buffer_raw[data_buffer_get][1],
-							data_buffer_raw[data_buffer_get][2]);
-					data_buffer_get = (data_buffer_get + 1) % DATA_BUFFER_SIZE;
-					records--;
-				}
-			}
-
-			// Mode: RAW SLIP
-			else if(storage.settings.mode == 2)
-			{
-				while((data_buffer_get != data_buffer_set) && (records))
-				{
-					uint8_t buffer[6];
-					for(uint8_t i = 0; i < 3; i++)
-					{
-						buffer[i * 2] = data_buffer_raw[data_buffer_get][i] >> 8;
-						buffer[i * 2 + 1] = data_buffer_raw[data_buffer_get][i];
-					}
-
-					uint8_t *slip = NULL;
-					string_cnt = slip_packet(&slip, buffer, 6);
-					memcpy(data_string, slip, string_cnt);
-					free(slip);
-
-					data_buffer_get = (data_buffer_get + 1) % DATA_BUFFER_SIZE;
-					records--;
-		    	}
+				string_cnt += sprintf(&data_string[string_cnt], "%lu\r\n", data_buffer[data_buffer_get]);
+				data_buffer_get = (data_buffer_get + 1) % DATA_BUFFER_SIZE;
+				records--;
 			}
 
 			// Transfer message
@@ -578,6 +546,8 @@ static void MX_DMA_Init(void)
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
+/* USER CODE BEGIN MX_GPIO_Init_1 */
+/* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOD_CLK_ENABLE();
@@ -600,6 +570,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+/* USER CODE BEGIN MX_GPIO_Init_2 */
+/* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
